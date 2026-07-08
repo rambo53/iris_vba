@@ -41,10 +41,17 @@ Sub Bouton1_Cliquer()
     Dim cle As Variant
     Dim celluleSource As Range
     Dim texteSource As String
+    Dim texteArrange As String
+    Dim axeExtrait As String
     Dim plageComptaFileToClean As Range
     Dim axe As Variant
     
+    Dim nbErreurs As Long
+    Dim listeErreurs As String
+    
     lineToStartComptaFile = 18
+    nbErreurs = 0
+    listeErreurs = ""
     
 ' =========================================================================
 ' SCRIPT
@@ -62,6 +69,21 @@ Sub Bouton1_Cliquer()
     ' 2. On boucle sur chaque cellule de l'autre plage à vérifier
     For Each celluleSource In plageLabel
         texteSource = Trim(CStr(celluleSource.Value)) ' On nettoie les espaces
+        
+        ' -- FIX réarrangement --
+        ' Aucun mot ne doit rester après la parenthèse fermante ")".
+        ' S'il y en a un, on le retire et on le recolle AVANT la parenthèse ouvrante,
+        ' et on réécrit PHYSIQUEMENT la cellule avec le texte corrigé.
+        texteArrange = RearrangerTexte(texteSource)
+        If texteArrange <> texteSource Then
+            celluleSource.Value = texteArrange
+            texteSource = texteArrange
+        End If
+        
+        ' L'axe est toujours le dernier mot juste avant la parenthèse ouvrante
+        ' (ou le dernier mot du texte s'il n'y a pas de parenthèse)
+        axeExtrait = DernierMotAvantParenthese(texteSource)
+        
         j = 1
         axeTrouve = False
         
@@ -69,8 +91,8 @@ Sub Bouton1_Cliquer()
         For Each axe In lstAxe
             texteLabel = Trim(CStr(axe))
             
-            ' Vérification : est-ce que le texte se termine par le label ?
-            If texteSource Like "*" & texteLabel Then
+            ' Comparaison exacte (insensible à la casse) sur le mot extrait
+            If StrComp(axeExtrait, texteLabel, vbTextCompare) = 0 Then
                 axeTrouve = True
             
                 Dim totalEuro As Variant
@@ -90,14 +112,23 @@ Sub Bouton1_Cliquer()
             j = j + 1
         Next axe
         
+        ' -- FIX erreurs groupées --
+        ' On ne s'arrête plus à la première ligne en erreur : on continue à vérifier
+        ' toutes les lignes, et on liste toutes celles en erreur à la fin.
         If axeTrouve = False Then
-            MsgBox "Aucun axe correspondant n'a été trouvé pour la valeur : '" & texteSource & "'", _
-                   vbExclamation, "Axe introuvable"
-            End
+            nbErreurs = nbErreurs + 1
+            listeErreurs = listeErreurs & "- Ligne " & celluleSource.Row & " (fichier_tarifs) : '" & _
+                           texteSource & "'  ->  axe lu : '" & axeExtrait & "'" & vbCrLf
         End If
         
     Next celluleSource
     
+    ' Si au moins une ligne est en erreur, on affiche la liste complète et on arrête
+    If nbErreurs > 0 Then
+        MsgBox "Nous avons " & nbErreurs & " axe(s) inconnu(s) dans le calcul axe :" & vbCrLf & vbCrLf & _
+               listeErreurs, vbExclamation, "Axe(s) introuvable(s)"
+        End
+    End If
     
     ' je modifie les valeurs de la colonne E de l'onglet "calculs_axes" en pourcentage
     wsCalculs.Columns(colPercentAxe).NumberFormat = "0.0%"
@@ -121,17 +152,20 @@ Sub Bouton1_Cliquer()
     ' récupératoin dictionnaire de valeurs
     Set dictTable = GetDictTable(wsCalculs, lineToStartCheckaxe, colTableParam)
     
-    If dictTable("Date")("value") <> "" Then
-        dictTable("Date")("value") = Date
-    End If
+    ' -- FIX date --
+    ' On NE réécrase PLUS la date saisie par l'utilisateur avec la date du jour.
+    ' La valeur vient directement de GetDictTable, qui conserve maintenant le vrai type Date
+    ' (au lieu de la convertir en texte, ce qui inversait jour/mois selon la locale).
     
     For Each cle In dictTable.Keys
         If cle Like "706*" Then
             wsCalculs.Range(colDateComptaFile & lineToStartComptaFile).Value = dictTable("Date")("value")
+            wsCalculs.Range(colDateComptaFile & lineToStartComptaFile).NumberFormat = "dd/mm/yyyy"
+            
             wsCalculs.Range(colJournalComptaFile & lineToStartComptaFile).Value = dictTable("Journal")("value")
             wsCalculs.Range(colCompteComptaFile & lineToStartComptaFile).Value = CStr(cle)
-            wsCalculs.Range(colPieceComptaFile & lineToStartComptaFile).Value = dictTable("Piece")("value") & dictTable("Date")("value")
-            wsCalculs.Range(colLabelComptaFile & lineToStartComptaFile).Value = dictTable(cle)("value") & "-" & dictTable("Date")("value")
+            wsCalculs.Range(colPieceComptaFile & lineToStartComptaFile).Value = dictTable("Piece")("value") & Format(dictTable("Date")("value"), "dd/mm/yyyy")
+            wsCalculs.Range(colLabelComptaFile & lineToStartComptaFile).Value = dictTable(cle)("value") & "-" & Format(dictTable("Date")("value"), "dd/mm/yyyy")
             
             dictTable(cle)("total") = Trim(Replace(dictTable(cle)("total"), "€", ""))
             
@@ -150,7 +184,7 @@ Sub Bouton1_Cliquer()
         End If
     Next cle
     
-    MsgBox "Génération terminée.", vbCritical
+    MsgBox "Géneration de l'analytique terminé ", vbInformation
 End Sub
 
 ' =========================================================================
@@ -192,10 +226,19 @@ Function GetDictTable(wsCalculs As Worksheet, lineToStartCheckaxe As Integer, co
     Do While wsCalculs.Cells(lineToStartCheckaxe, colTableParam).Value <> ""
         Set DictVal = CreateObject("Scripting.Dictionary")
         
-        DictVal("value") = Trim(wsCalculs.Cells(lineToStartCheckaxe, 2).Value)
+        cle = wsCalculs.Cells(lineToStartCheckaxe, 1).Value
+        
+        If Trim(cle) = "Date" Then
+            ' -- FIX date --
+            ' On garde la vraie valeur Date de la cellule (pas de Trim/CStr qui la
+            ' transformerait en texte et pourrait inverser jour/mois selon la locale).
+            DictVal("value") = wsCalculs.Cells(lineToStartCheckaxe, 2).Value
+        Else
+            DictVal("value") = Trim(wsCalculs.Cells(lineToStartCheckaxe, 2).Value)
+        End If
+        
         DictVal("total") = wsCalculs.Cells(lineToStartCheckaxe, 3).Value
         
-        cle = wsCalculs.Cells(lineToStartCheckaxe, 1).Value
         Set MonDico(Trim(cle)) = DictVal
         lineToStartCheckaxe = lineToStartCheckaxe + 1
     Loop
@@ -204,7 +247,69 @@ Function GetDictTable(wsCalculs As Worksheet, lineToStartCheckaxe As Integer, co
 End Function
 
 
+Function RearrangerTexte(ByVal texteSource As String) As String
+    ' Règle : aucun mot ne doit rester après la parenthèse fermante ")".
+    ' S'il y en a un, on le retire et on le colle AVANT la parenthèse ouvrante "(",
+    ' et la parenthèse "(...)" repasse à la toute fin du texte.
+    '   ex : "CINEJUNIOR 2024 (A83) scolaire" -> "CINEJUNIOR 2024 scolaire (A83)"
+    '   ex : "Cinécole  (A66) cinecole"        -> "Cinécole cinecole (A66)"
+    ' S'il n'y a rien après la ")", ou pas de parenthèse du tout, le texte ne bouge pas.
+    
+    Dim posOuvre As Long
+    Dim posFerme As Long
+    Dim apresParenthese As String
+    Dim avantParenthese As String
+    Dim parenthese As String
+    Dim texteFinal As String
+    
+    texteSource = Trim(texteSource)
+    
+    posFerme = InStrRev(texteSource, ")")
+    posOuvre = InStrRev(texteSource, "(")
+    
+    If posOuvre = 0 Or posFerme = 0 Or posFerme < posOuvre Then
+        ' Pas de parenthèse complète (A(...)) valable : on ne touche à rien
+        RearrangerTexte = texteSource
+        Exit Function
+    End If
+    
+    apresParenthese = Trim(Mid(texteSource, posFerme + 1))
+    avantParenthese = Trim(Left(texteSource, posOuvre - 1))
+    parenthese = Mid(texteSource, posOuvre, posFerme - posOuvre + 1) ' ex "(A83)"
+    
+    If apresParenthese <> "" Then
+        ' On retire le mot après la ")" et on le recolle avant la "(",
+        ' la parenthèse se retrouve alors en toute fin de texte
+        texteFinal = avantParenthese & " " & apresParenthese & " " & parenthese
+    Else
+        ' Rien après la ")", le texte est déjà correct
+        texteFinal = texteSource
+    End If
+    
+    RearrangerTexte = Trim(texteFinal)
+End Function
 
+
+Function DernierMotAvantParenthese(ByVal texteArrange As String) As String
+    ' Renvoie le dernier mot juste avant la parenthèse ouvrante "(".
+    ' S'il n'y a pas de parenthèse, renvoie le dernier mot du texte.
+    
+    Dim posOuvre As Long
+    Dim avant As String
+    Dim mots() As String
+    
+    texteArrange = Trim(texteArrange)
+    posOuvre = InStrRev(texteArrange, "(")
+    
+    If posOuvre > 0 Then
+        avant = Trim(Left(texteArrange, posOuvre - 1))
+    Else
+        avant = texteArrange
+    End If
+    
+    mots = Split(avant, " ")
+    DernierMotAvantParenthese = mots(UBound(mots))
+End Function
 
 
 
